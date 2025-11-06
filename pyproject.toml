@@ -1,5 +1,5 @@
 [project]
-name = "forty2-headers"
+name = "norminette-header-replace"
 version = "0.1.0"
 description = "Batch-update 42-style headers with your name and realistic timestamps."
 readme = "README.md"
@@ -7,7 +7,7 @@ requires-python = ">=3.8"
 license = { text = "MIT" }
 
 [project.scripts]
-forty2-headers = "forty2_headers.cli:main"
+norminette-header-replace = "norminette-header-replace.cli:main"
 
 [tool.setuptools]
-packages = ["forty2_headers"]
+packages = ["norminette-header-replace"]
