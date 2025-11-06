@@ -4,9 +4,11 @@ import os
 import random
 import re
 from datetime import datetime, timedelta
+from typing import List, Tuple, Optional
 
 HEADER_SCAN_LINES = 20
 
+# Detect existing 42-ish fields (we only need to find these to "recognize" a header)
 RE_BY       = re.compile(r"(.*?\bBy:\s*)([^<\n]*?)(\s*(<[^>]*>)?.*)$")
 RE_CREATED  = re.compile(r"(.*?\bCreated:\s*)(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})(\s+by\s+.*)$")
 RE_UPDATED  = re.compile(r"(.*?\bUpdated:\s*)(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})(\s+by\s+.*)$")
@@ -14,8 +16,9 @@ RE_UPDATED  = re.compile(r"(.*?\bUpdated:\s*)(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d
 def format_42(dt: datetime) -> str:
     return dt.strftime("%Y/%m/%d %H:%M:%S")
 
-def looks_like_42_header(lines):
+def looks_like_42_header(lines: List[str]) -> bool:
     chunk = "\n".join(lines[:HEADER_SCAN_LINES])
+    # Cheap signature: has By/Created/Updated near the top
     return all(s in chunk for s in ("By:", "Created:", "Updated:"))
 
 def adjust_width_preserving_tail(old_line: str, new_line: str) -> str:
@@ -42,12 +45,13 @@ def adjust_width_preserving_tail(old_line: str, new_line: str) -> str:
         return new_line
     return new_line[:run_start] + (' ' * (run_len - diff)) + new_line[run_end+1:]
 
-def update_by_line(line: str, name: str, preserve_width: bool) -> str:
+def update_by_line(line: str, name: str, email: Optional[str], preserve_width: bool) -> str:
     m = RE_BY.match(line)
     if not m:
         return line
     left, _old, tail = m.groups()
-    new_line = f"{left}{name}{tail}"
+    by_val = name if not email else f"{name} <{email}>"
+    new_line = f"{left}{by_val}{tail}"
     return adjust_width_preserving_tail(line, new_line) if preserve_width else new_line
 
 def update_dt_line(line: str, re_obj: re.Pattern, new_dt: datetime, preserve_width: bool) -> str:
@@ -58,9 +62,9 @@ def update_dt_line(line: str, re_obj: re.Pattern, new_dt: datetime, preserve_wid
     new_line = f"{left}{format_42(new_dt)}{tail}"
     return adjust_width_preserving_tail(line, new_line) if preserve_width else new_line
 
-def collect_files(root: str, exts, recursive: bool):
+def collect_files(root: str, exts, recursive: bool) -> List[str]:
     exts = set(e.lower() for e in exts) if exts else None
-    files = []
+    files: List[str] = []
     if recursive:
         for dirpath, _dirs, fnames in os.walk(root):
             for fn in fnames:
@@ -73,53 +77,137 @@ def collect_files(root: str, exts, recursive: bool):
                 files.append(p)
     return sorted(files, key=lambda p: p.lower())
 
-def plan_timeline(n_files: int, now: datetime, gap_min_s: int, gap_max_s: int,
-                  work_min_s: int, work_max_s: int) -> list[tuple[datetime, datetime]]:
+def comment_style_for_ext(ext: str) -> str:
+    ext = ext.lower()
+    if ext in (".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".java", ".js", ".ts", ".tsx", ".cs"):
+        return "c"      # /* ... */
+    if ext in (".py", ".sh", ".rb", ".lua"):
+        return "hash"   # # ...
+    # default to C-style
+    return "c"
+
+def build_header_block(
+    filename: str,
+    name: str,
+    email: Optional[str],
+    created_dt: datetime,
+    updated_dt: datetime,
+    style: str = "c",
+    width: int = 80
+) -> List[str]:
     """
-    Returns [(created, updated), ...] of length n_files.
-    Rules:
-      - All timestamps are 'today' (local date of 'now').
-      - Each file Updated - Created in [work_min_s, work_max_s] seconds (3–6 mins).
-      - Created times increase by [gap_min_s, gap_max_s] (1–2 mins) between files.
-      - Fit within today's end-of-day.
+    Generates a clean 42-style header block (80 chars wide) with minimal, norm-friendly content.
+    We avoid super-fussy ASCII art so spacing is robust and deterministic.
     """
-    if n_files == 0:
-        return []
+    created = format_42(created_dt)
+    updated = format_42(updated_dt)
+    by_line = f"By: {name}" + (f" <{email}>" if email else "")
 
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_day = start_of_day + timedelta(days=1) - timedelta(seconds=1)
+    if style == "c":
+        prefix = "/* "
+        suffix = " */"
+        inner_width = width - len(prefix) - len(suffix)
 
-    # Random gaps and work durations
-    rng = random.Random()
-    gaps = [rng.randint(gap_min_s, gap_max_s) for _ in range(max(n_files - 1, 0))]
-    works = [rng.randint(work_min_s, work_max_s) for _ in range(n_files)]
+        def border(char: str = "*") -> str:
+            return prefix + (char * inner_width) + suffix
 
-    total_gaps = sum(gaps)
-    max_tail = works[-1]
-    total_span = total_gaps + max_tail
+        def blank() -> str:
+            return prefix + (" " * inner_width) + suffix
 
-    # Latest safe base so last Updated <= end_of_day
-    latest_base = end_of_day - timedelta(seconds=total_span)
-    # Choose base <= now if possible; else clamp to start_of_day
-    base = min(now, latest_base)
-    if base < start_of_day:
-        base = start_of_day + timedelta(seconds=1)
+        def content(text: str) -> str:
+            return prefix + text.ljust(inner_width) + suffix
 
-    times = []
-    t = base
-    for i in range(n_files):
-        created = t
-        updated = min(created + timedelta(seconds=works[i]), end_of_day)
-        times.append((created, updated))
-        if i < n_files - 1:
-            t = t + timedelta(seconds=gaps[i])
+        return [
+            border("*"),
+            blank(),
+            content(f"File: {os.path.basename(filename)}"),
+            content(by_line),
+            content(f"Created: {created} by {name}"),
+            content(f"Updated: {updated} by {name}"),
+            blank(),
+            border("*"),
+            "",
+        ]
 
-    # Ensure all are today (just in case)
-    times = [(max(start_of_day, c), min(end_of_day, u)) for c, u in times]
-    return times
+    # hash style (Python/shell)
+    line = "#" * width
+    def hcontent(text: str) -> str:
+        # '# ' + text padded to width
+        pad = max(0, width - 2 - len(text))
+        return "# " + text + (" " * pad)
 
-def process_file_with_times(path: str, name: str, created_dt: datetime, updated_dt: datetime,
-                            preserve_width: bool, dry_run: bool):
+    return [
+        line,
+        hcontent(f"File: {os.path.basename(filename)}"),
+        hcontent(by_line),
+        hcontent(f"Created: {created} by {name}"),
+        hcontent(f"Updated: {updated} by {name}"),
+        line,
+        "",
+    ]
+
+def insert_header_if_missing(
+    path: str,
+    name: str,
+    email: Optional[str],
+    created_dt: datetime,
+    updated_dt: datetime,
+    dry_run: bool
+) -> Tuple[bool, str]:
+    """
+    If the file lacks a 42 header, insert one at the top.
+    For scripts with a shebang, put the header after the shebang.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+    except Exception:
+        return False, "read-fail"
+
+    lines = content.splitlines(keepends=True)
+    head = lines[:HEADER_SCAN_LINES]
+    if looks_like_42_header(head):
+        return False, "already-has-header"
+
+    style = comment_style_for_ext(os.path.splitext(path)[1])
+    header_lines = build_header_block(
+        filename=path,
+        name=name,
+        email=email,
+        created_dt=created_dt,
+        updated_dt=updated_dt,
+        style=style
+    )
+    header_text = "".join(l if l.endswith("\n") else l + "\n" for l in header_lines)
+
+    insert_idx = 0
+    # Preserve shebang as first line if present
+    if lines and lines[0].startswith("#!"):
+        insert_idx = 1
+
+    new_content = "".join(lines[:insert_idx]) + header_text + "".join(lines[insert_idx:])
+    if not dry_run:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+        except Exception:
+            return False, "write-fail"
+
+    return True, "inserted"
+
+def process_file_update_existing(
+    path: str,
+    name: str,
+    email: Optional[str],
+    created_dt: datetime,
+    updated_dt: datetime,
+    preserve_width: bool,
+    dry_run: bool
+) -> Tuple[bool, str]:
+    """
+    Update existing header fields (By/Created/Updated).
+    Returns (changed, status). If no header present, returns (False, "no-42-header").
+    """
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
@@ -139,7 +227,7 @@ def process_file_with_times(path: str, name: str, created_dt: datetime, updated_
         line = new_lines[i]
         orig = line
         if "By:" in line:
-            line = update_by_line(line, name, preserve_width)
+            line = update_by_line(line, name, email, preserve_width)
         if "Created:" in line:
             line = update_dt_line(line, RE_CREATED, created_dt, preserve_width)
         if "Updated:" in line:
@@ -155,10 +243,53 @@ def process_file_with_times(path: str, name: str, created_dt: datetime, updated_
         except Exception:
             return False, "write-fail"
 
-    return changed, "ok"
+    return changed, "ok" if changed else "unchanged"
 
-def infer_default_name() -> str | None:
-    # Try git config
+def plan_timeline(
+    n_files: int,
+    now: datetime,
+    gap_min_s: int, gap_max_s: int,
+    work_min_s: int, work_max_s: int
+) -> List[Tuple[datetime, datetime]]:
+    """
+    [(created, updated), ...] for n_files.
+    - All stamps are today.
+    - Updated - Created in [work_min_s, work_max_s].
+    - Created gaps in [gap_min_s, gap_max_s] between files.
+    - Fit by end of day.
+    """
+    if n_files == 0:
+        return []
+
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_day = start_of_day + timedelta(days=1) - timedelta(seconds=1)
+
+    rng = random.Random()
+    gaps = [rng.randint(gap_min_s, gap_max_s) for _ in range(max(n_files - 1, 0))]
+    works = [rng.randint(work_min_s, work_max_s) for _ in range(n_files)]
+
+    total_gaps = sum(gaps)
+    max_tail = works[-1]
+    total_span = total_gaps + max_tail
+
+    latest_base = end_of_day - timedelta(seconds=total_span)
+    base = min(now, latest_base)
+    if base < start_of_day:
+        base = start_of_day + timedelta(seconds=1)
+
+    times: List[Tuple[datetime, datetime]] = []
+    t = base
+    for i in range(n_files):
+        created = t
+        updated = min(created + timedelta(seconds=works[i]), end_of_day)
+        times.append((created, updated))
+        if i < n_files - 1:
+            t = t + timedelta(seconds=gaps[i])
+
+    times = [(max(start_of_day, c), min(end_of_day, u)) for c, u in times]
+    return times
+
+def infer_default_name() -> Optional[str]:
     try:
         import subprocess
         name = subprocess.check_output(
@@ -174,41 +305,47 @@ def infer_default_name() -> str | None:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Update 42 headers with your name and realistic per-file timelines (today)."
+        description="Update or insert 42-style headers with your name and same-day realistic timestamps."
     )
     ap.add_argument("directory", help="Directory to scan")
-    ap.add_argument("--name", help="Name to put in 'By:' line (default: $FORTY2_NAME or git user.name)")
+    ap.add_argument("--name", help="Name for 'By:' (default: $FORTY2_NAME or git user.name)")
+    ap.add_argument("--email", help="Email for 'By:' (optional, or set $FORTY2_EMAIL)")
     ap.add_argument("--ext", nargs="*", default=[".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".py"],
                     help="File extensions to include")
     ap.add_argument("--recursive", action="store_true", help="Recurse into subdirectories")
-    ap.add_argument("--preserve-width", action="store_true", help="Preserve header line widths")
-    ap.add_argument("--dry-run", action="store_true", help="Preview changes without writing")
+    ap.add_argument("--preserve-width", action="store_true", help="Preserve line widths when updating existing headers")
+    ap.add_argument("--dry-run", action="store_true", help="Preview without writing changes")
     ap.add_argument("--order", choices=["name", "mtime"], default="name",
                     help="Order files before timestamping (default: name)")
+    # Timing knobs (defaults lock to your requirement: 1–2m gaps, 3–6m per-file work)
     ap.add_argument("--gap-min", type=int, default=60, help="Seconds between consecutive files (min, default 60)")
     ap.add_argument("--gap-max", type=int, default=120, help="Seconds between consecutive files (max, default 120)")
     ap.add_argument("--work-min", type=int, default=180, help="Seconds between Created and Updated (min, default 180)")
     ap.add_argument("--work-max", type=int, default=360, help="Seconds between Created and Updated (max, default 360)")
     ap.add_argument("--seed", type=int, help="Seed for reproducible timing plan")
+    # NEW: add headers when missing
+    ap.add_argument("--add-missing", action="store_true",
+                    help="Insert a 42-style header if the file does not have one")
 
     args = ap.parse_args()
 
     name = args.name or os.getenv("FORTY2_NAME") or infer_default_name()
     if not name:
-        ap.error("Please provide --name or set $FORTY2_NAME or git user.name.")
+        ap.error("Please provide --name or set $FORTY2_NAME or configure git user.name.")
+
+    email = args.email or os.getenv("FORTY2_EMAIL")
 
     files = collect_files(args.directory, args.ext, args.recursive)
     if args.order == "mtime":
         files.sort(key=lambda p: os.path.getmtime(p))
 
+    if args.seed is not None:
+        random.seed(args.seed)
+
     n = len(files)
     if n == 0:
         print("No files found with the given extensions.")
         return
-
-    # Reproducibility
-    if args.seed is not None:
-        random.seed(args.seed)
 
     now = datetime.now()
     times = plan_timeline(
@@ -220,19 +357,37 @@ def main():
         work_max_s=args.work_max
     )
 
-    updated = 0
-    skipped = 0
-    for path, (created_dt, updated_dt) in zip(files, times):
-        did_change, status = process_file_with_times(
-            path, name, created_dt, updated_dt, args.preserve_width, args.dry_run
-        )
-        if did_change:
-            action = "WOULD UPDATE" if args.dry_run else "UPDATED"
-            print(f"{action}: {path}  [{format_42(created_dt)} -> {format_42(updated_dt)}]")
-            updated += 1
-        else:
-            skipped += 1
-            if status not in ("no-42-header", "ok"):
-                print(f"SKIP ({status}): {path}")
+    updated_cnt = 0
+    inserted_cnt = 0
+    skipped_cnt = 0
 
-    print(f"\nDone. Files: {n}. Updated: {updated}. Skipped: {skipped}.")
+    for path, (created_dt, updated_dt) in zip(files, times):
+        changed, status = process_file_update_existing(
+            path, name, email, created_dt, updated_dt, args.preserve_width, args.dry_run
+        )
+        if changed:
+            updated_cnt += 1
+            print(f"{'WOULD UPDATE' if args.dry_run else 'UPDATED'}: {path} "
+                  f"[{format_42(created_dt)} -> {format_42(updated_dt)}]")
+            continue
+
+        # No header found: optionally insert one
+        if status == "no-42-header" and args.add-missing:
+            did_insert, istatus = insert_header_if_missing(
+                path, name, email, created_dt, updated_dt, args.dry_run
+            )
+            if did_insert:
+                inserted_cnt += 1
+                print(f"{'WOULD INSERT' if args.dry_run else 'INSERTED'}: {path} "
+                      f"[{format_42(created_dt)} -> {format_42(updated_dt)}]")
+            else:
+                skipped_cnt += 1
+                if istatus not in ("already-has-header",):
+                    print(f"SKIP ({istatus}): {path}")
+        else:
+            skipped_cnt += 1
+            if status not in ("unchanged", "ok"):
+                # noisy only for interesting statuses
+                pass
+
+    print(f"\nDone. Files: {n}. Updated: {updated_cnt}. Inserted: {inserted_cnt}. Skipped: {skipped_cnt}.")
