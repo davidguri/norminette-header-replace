@@ -393,7 +393,7 @@ def main() -> None:
             continue
 
         # No header found: optionally insert one
-        if status == "no-42-header" and args.add-missing:
+        if status == "no-42-header" and args.add_missing:
             did_insert, istatus = insert_header_if_missing(
                 path, name, email, created_dt, updated_dt, args.dry_run
             )
