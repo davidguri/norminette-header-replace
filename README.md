@@ -14,6 +14,12 @@ pipx install "git+https://github.com/davidguri/norminette-header-replace.git"
 
 Below are a couple ways to use the cli
 
+### Help
+
+```bash
+norminette-header-replace --help
+```
+
 ### Batch-replace
 
 ```bash
