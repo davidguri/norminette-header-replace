@@ -1,5 +1,4 @@
 # norminette_header_replace/cli.py
-# CLI to update or insert 42-style headers with same-day, realistic timelines.
 from __future__ import annotations
 
 import argparse
@@ -27,19 +26,32 @@ def looks_like_42_header(lines: List[str]) -> bool:
     chunk = "\n".join(lines[:HEADER_SCAN_LINES])
     return all(s in chunk for s in ("By:", "Created:", "Updated:"))
 
+def _find_comment_ender_index(new_line: str) -> int:
+    """
+    If the line ends with a block comment ender, return its start index,
+    prioritizing the rightmost of '*/' or '-->'.
+    """
+    end_idx = len(new_line)
+    enders = []
+    e1 = new_line.rfind("*/")
+    if e1 != -1:
+        enders.append(e1)
+    e2 = new_line.rfind("-->")
+    if e2 != -1:
+        enders.append(e2)
+    if enders:
+        end_idx = max(enders)
+    return end_idx
+
 def adjust_width_preserving_tail(old_line: str, new_line: str) -> str:
     """
     Keep overall line length stable by adjusting the last run of spaces
-    before the comment ender (*/). Best-effort; falls back to new_line.
+    before the comment ender (*/ or -->). Best-effort; falls back to new_line.
     """
     if len(new_line) == len(old_line):
         return new_line
 
-    end_idx = len(new_line)
-    ender_pos = new_line.rfind("*/")
-    if ender_pos != -1:
-        end_idx = ender_pos
-
+    end_idx = _find_comment_ender_index(new_line)
     diff = len(new_line) - len(old_line)
 
     run_start = None
@@ -97,10 +109,15 @@ def collect_files(root: str, exts: Optional[List[str]], recursive: bool) -> List
 
 def comment_style_for_ext(ext: str) -> str:
     ext = ext.lower()
-    if ext in (".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".java", ".js", ".ts", ".tsx", ".cs"):
+    # C-style block comments
+    if ext in (".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".java", ".js", ".ts", ".tsx", ".cs", ".css", ".scss"):
         return "c"      # /* ... */
-    if ext in (".py", ".sh", ".rb", ".lua"):
+    # Hash-style comments
+    if ext in (".py", ".sh", ".rb", ".lua", ".pl"):
         return "hash"   # # ...
+    # HTML/Markdown/XML comments
+    if ext in (".md", ".html", ".htm", ".xml"):
+        return "html"   # <!-- ... -->
     # default to C-style
     return "c"
 
@@ -144,6 +161,32 @@ def build_header_block(
             content(f"Updated: {updated} by {name}"),
             blank(),
             border("*"),
+            "",
+        ]
+
+    if style == "html":
+        prefix = "<!-- "
+        suffix = " -->"
+        inner_width = width - len(prefix) - len(suffix)
+
+        def border(char: str = "-") -> str:
+            return prefix + (char * inner_width) + suffix
+
+        def blank() -> str:
+            return prefix + (" " * inner_width) + suffix
+
+        def content(text: str) -> str:
+            return prefix + text.ljust(inner_width) + suffix
+
+        return [
+            border("-"),
+            blank(),
+            content(f"File: {os.path.basename(filename)}"),
+            content(by_line),
+            content(f"Created: {created} by {name}"),
+            content(f"Updated: {updated} by {name}"),
+            blank(),
+            border("-"),
             "",
         ]
 
@@ -199,8 +242,8 @@ def insert_header_if_missing(
     header_text = "".join(l if l.endswith("\n") else l + "\n" for l in header_lines)
 
     insert_idx = 0
-    # Preserve shebang on first line
-    if lines and lines[0].startswith("#!"):
+    # Preserve shebang on first line for hash-style languages
+    if lines and lines[0].startswith("#!") and style == "hash":
         insert_idx = 1
 
     new_content = "".join(lines[:insert_idx]) + header_text + "".join(lines[insert_idx:])
@@ -331,8 +374,12 @@ def main() -> None:
     ap.add_argument("directory", help="Directory to scan")
     ap.add_argument("--name", help="Name for 'By:' (default: $FORTY2_NAME or git user.name)")
     ap.add_argument("--email", help="Email for 'By:' (optional, or set $FORTY2_EMAIL)")
-    ap.add_argument("--ext", nargs="*", default=[".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".py"],
-                    help="File extensions to include")
+    ap.add_argument(
+        "--ext",
+        nargs="*",
+        default=[".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".py", ".md"],
+        help="File extensions to include",
+    )
     ap.add_argument("--recursive", action="store_true", help="Recurse into subdirectories")
     ap.add_argument("--preserve-width", action="store_true",
                     help="Preserve existing header line widths when updating")
