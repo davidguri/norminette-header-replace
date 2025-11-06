@@ -1,0 +1,13 @@
+[project]
+name = "forty2-headers"
+version = "0.1.0"
+description = "Batch-update 42-style headers with your name and realistic timestamps."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+
+[project.scripts]
+forty2-headers = "forty2_headers.cli:main"
+
+[tool.setuptools]
+packages = ["forty2_headers"]
