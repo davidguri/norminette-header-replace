@@ -18,15 +18,26 @@ Below are a couple ways to use the cli
 
 ```bash
 norminette-header-replace . \
-  --name "David Guri" \
+  --name "John Doe" \
   --recursive \
   --preserve-width
+```
+
+### Add missing
+
+```bash
+norminette-header-replace . \
+  --name "John Doe" \
+  --email "john.doe@learner.42.tech" \
+  --recursive \
+  --preserve-width \
+  --add-missing
 ```
 
 ### Dry-run (recommended first)
 
 ```bash
-norminette-header-replace . --name "David Guri" --recursive --dry-run
+norminette-header-replace . --name "John Doe" --recursive --dry-run
 ```
 
 ### If you don't use pipx
