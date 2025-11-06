@@ -12,7 +12,7 @@ pipx install "git+https://github.com/davidguri/norminette-header-replace.git"
 
 ## How to use
 
-Below are a couple ways to use the cli
+Below are a couple ways to use the cli. The `name` tag is the username you use at 42
 
 ### Help
 
@@ -24,7 +24,7 @@ norminette-header-replace --help
 
 ```bash
 norminette-header-replace . \
-  --name "John Doe" \
+  --name "jdoe" \
   --recursive \
   --preserve-width
 ```
@@ -33,7 +33,7 @@ norminette-header-replace . \
 
 ```bash
 norminette-header-replace . \
-  --name "John Doe" \
+  --name "jdoe" \
   --email "john.doe@learner.42.tech" \
   --recursive \
   --preserve-width \
@@ -43,7 +43,7 @@ norminette-header-replace . \
 ### Dry-run (recommended first)
 
 ```bash
-norminette-header-replace . --name "John Doe" --recursive --dry-run
+norminette-header-replace . --name "jdoe" --recursive --dry-run
 ```
 
 ### If you don't use pipx
