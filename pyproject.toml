@@ -7,7 +7,7 @@ requires-python = ">=3.8"
 license = { text = "MIT" }
 
 [project.scripts]
-norminette-header-replace = "norminette-header-replace.cli:main"
+norminette-header-replace = "norminette_headers_replace.cli:main"
 
 [tool.setuptools]
-packages = ["norminette-header-replace"]
+packages = ["norminette_headers_replace"]
