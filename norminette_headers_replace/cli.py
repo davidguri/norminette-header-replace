@@ -11,7 +11,7 @@ from typing import List, Tuple, Optional
 HEADER_SCAN_LINES = 20  # only look near the top
 
 # Detect existing 42-ish fields
-RE_BY      = re.compile(r"(.*?\bBy:\s*)([^<\n]*?)(\s*(<[^>]*>)?.*)$")
+RE_BY      = re.compile(r"(.*?\bBy:\s*)([^<\n]*)(\s*)(<[^>]*>)?(.*)$")
 RE_CREATED = re.compile(r"(.*?\bCreated:\s*)(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})(\s+by\s+.*)$")
 RE_UPDATED = re.compile(r"(.*?\bUpdated:\s*)(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})(\s+by\s+.*)$")
 
@@ -25,6 +25,7 @@ def looks_like_42_header(lines: List[str]) -> bool:
     """Cheap signature: has By/Created/Updated near the top."""
     chunk = "\n".join(lines[:HEADER_SCAN_LINES])
     return all(s in chunk for s in ("By:", "Created:", "Updated:"))
+
 
 def _find_comment_ender_index(new_line: str) -> int:
     """
@@ -75,21 +76,31 @@ def adjust_width_preserving_tail(old_line: str, new_line: str) -> str:
     return new_line[:run_start] + (' ' * (run_len - diff)) + new_line[run_end+1:]
 
 def update_by_line(line: str, name: str, email: Optional[str], preserve_width: bool) -> str:
-    m = RE_BY.match(line)
+    line_ending = "\r\n" if line.endswith("\r\n") else ("\n" if line.endswith("\n") else "")
+    line_body = line[:-len(line_ending)] if line_ending else line
+    m = RE_BY.match(line_body)
     if not m:
         return line
-    left, _old, tail = m.groups()
+    left = m.group(1)
+    gap = m.group(3) or ""
+    old_email = m.group(4)
+    rest = m.group(5) or ""
     by_val = name if not email else f"{name} <{email}>"
+    tail = rest if old_email else (gap + rest)
     new_line = f"{left}{by_val}{tail}"
-    return adjust_width_preserving_tail(line, new_line) if preserve_width else new_line
+    new_line = adjust_width_preserving_tail(line_body, new_line) if preserve_width else new_line
+    return new_line + line_ending
 
 def update_dt_line(line: str, re_obj: re.Pattern, new_dt: datetime, preserve_width: bool) -> str:
-    m = re_obj.match(line)
+    line_ending = "\r\n" if line.endswith("\r\n") else ("\n" if line.endswith("\n") else "")
+    line_body = line[:-len(line_ending)] if line_ending else line
+    m = re_obj.match(line_body)
     if not m:
         return line
     left, _old_dt, tail = m.groups()
     new_line = f"{left}{format_42(new_dt)}{tail}"
-    return adjust_width_preserving_tail(line, new_line) if preserve_width else new_line
+    new_line = adjust_width_preserving_tail(line_body, new_line) if preserve_width else new_line
+    return new_line + line_ending
 
 def collect_files(root: str, exts: Optional[List[str]], recursive: bool) -> List[str]:
     exts_set = set(e.lower() for e in exts) if exts else None
@@ -107,19 +118,28 @@ def collect_files(root: str, exts: Optional[List[str]], recursive: bool) -> List
     # default ordering: case-insensitive name
     return sorted(files, key=lambda p: p.lower())
 
-def comment_style_for_ext(ext: str) -> str:
-    ext = ext.lower()
-    # C-style block comments
-    if ext in (".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".java", ".js", ".ts", ".tsx", ".cs", ".css", ".scss"):
-        return "c"      # /* ... */
-    # Hash-style comments
-    if ext in (".py", ".sh", ".rb", ".lua", ".pl"):
-        return "hash"   # # ...
-    # HTML/Markdown/XML comments
-    if ext in (".md", ".html", ".htm", ".xml"):
-        return "html"   # <!-- ... -->
-    # default to C-style
-    return "c"
+def comment_style_for_ext(filename: str) -> Tuple[str, str, str]:
+    """
+    Return (start, end, fill) based on 42 header vim script rules.
+    Default is hash-style.
+    """
+    types = [
+        (r"\.c$|\.h$|\.cc$|\.hh$|\.cpp$|\.hpp$|\.tpp$|\.ipp$|\.cxx$|\.go$|\.rs$|\.php$|\.java$|\.kt$|\.kts$",
+         ("/*", "*/", "*")),
+        (r"\.htm$|\.html$|\.xml$", ("<!--", "-->", "*")),
+        (r"\.js$|\.ts$", ("//", "//", "*")),
+        (r"\.tex$", ("%", "%", "*")),
+        (r"\.ml$|\.mli$|\.mll$|\.mly$", ("(*", "*)", "*")),
+        (r"\.vim$|\\vimrc$", ('"', '"', "*")),
+        (r"\.el$|\\emacs$|\.asm$", (";", ";", "*")),
+        (r"\.f90$|\.f95$|\.f03$|\.f$|\.for$", ("!", "!", "/")),
+        (r"\.lua$", ("--", "--", "-")),
+        (r"\.py$", ("#", "#", "*")),
+    ]
+    for pattern, style in types:
+        if re.search(pattern, filename, re.IGNORECASE):
+            return style
+    return ("#", "#", "*")
 
 def build_header_block(
     filename: str,
@@ -127,85 +147,66 @@ def build_header_block(
     email: Optional[str],
     created_dt: datetime,
     updated_dt: datetime,
-    style: str = "c",
-    width: int = 80
+    style: Tuple[str, str, str] = ("/*", "*/", "*"),
+    width: int = 80,
+    margin: int = 5
 ) -> List[str]:
     """
     Generate a robust 42-style header block.
-    Not the ornate ASCII version—simple + norm-friendly + deterministic spacing.
+    Matches the 42 vim script layout and spacing.
     """
     created = format_42(created_dt)
     updated = format_42(updated_dt)
     by_line = f"By: {name}" + (f" <{email}>" if email else "")
 
-    if style == "c":
-        prefix = "/* "
-        suffix = " */"
-        inner_width = width - len(prefix) - len(suffix)
-
-        def border(char: str = "*") -> str:
-            return prefix + (char * inner_width) + suffix
-
-        def blank() -> str:
-            return prefix + (" " * inner_width) + suffix
-
-        def content(text: str) -> str:
-            return prefix + text.ljust(inner_width) + suffix
-
-        return [
-            border("*"),
-            blank(),
-            content(f"File: {os.path.basename(filename)}"),
-            content(by_line),
-            content(f"Created: {created} by {name}"),
-            content(f"Updated: {updated} by {name}"),
-            blank(),
-            border("*"),
-            "",
-        ]
-
-    if style == "html":
-        prefix = "<!-- "
-        suffix = " -->"
-        inner_width = width - len(prefix) - len(suffix)
-
-        def border(char: str = "-") -> str:
-            return prefix + (char * inner_width) + suffix
-
-        def blank() -> str:
-            return prefix + (" " * inner_width) + suffix
-
-        def content(text: str) -> str:
-            return prefix + text.ljust(inner_width) + suffix
-
-        return [
-            border("-"),
-            blank(),
-            content(f"File: {os.path.basename(filename)}"),
-            content(by_line),
-            content(f"Created: {created} by {name}"),
-            content(f"Updated: {updated} by {name}"),
-            blank(),
-            border("-"),
-            "",
-        ]
-
-    # Hash style (Python/shell)
-    line = "#" * width
-
-    def hcontent(text: str) -> str:
-        pad = max(0, width - 2 - len(text))
-        return "# " + text + (" " * pad)
-
-    return [
-        line,
-        hcontent(f"File: {os.path.basename(filename)}"),
-        hcontent(by_line),
-        hcontent(f"Created: {created} by {name}"),
-        hcontent(f"Updated: {updated} by {name}"),
-        line,
-        "",
+    start, end, fill = style
+    asciiart = [
+        "        :::      ::::::::",
+        "      :+:      :+:    :+:",
+        "    +:+ +:+         +:+  ",
+        "  +#+  +:+       +#+     ",
+        "+#+#+#+#+#+   +#+        ",
+        "     #+#    #+#          ",
+        "    ###   ########.fr    ",
     ]
+
+    def ascii_line(n: int) -> str:
+        return asciiart[n - 3]
+
+    def text_line(left: str, right: str) -> str:
+        max_left = width - margin * 2 - len(right)
+        left = left[:max_left]
+        spaces = max_left - len(left)
+        if spaces < 0:
+            spaces = 0
+        return (
+            start
+            + (" " * (margin - len(start)))
+            + left
+            + (" " * spaces)
+            + right
+            + (" " * (margin - len(end)))
+            + end
+        )
+
+    def line(n: int) -> str:
+        if n in (1, 11):
+            return start + " " + (fill * (width - len(start) - len(end) - 2)) + " " + end
+        if n in (2, 10):
+            return text_line("", "")
+        if n in (3, 5, 7):
+            return text_line("", ascii_line(n))
+        if n == 4:
+            return text_line(os.path.basename(filename), ascii_line(n))
+        if n == 6:
+            return text_line(by_line, ascii_line(n))
+        if n == 8:
+            return text_line(f"Created: {created} by {name}", ascii_line(n))
+        if n == 9:
+            return text_line(f"Updated: {updated} by {name}", ascii_line(n))
+        return text_line("", "")
+
+    return [line(i) for i in range(1, 12)]
 
 def insert_header_if_missing(
     path: str,
@@ -230,7 +231,7 @@ def insert_header_if_missing(
     if looks_like_42_header(head):
         return False, "already-has-header"
 
-    style = comment_style_for_ext(os.path.splitext(path)[1])
+    style = comment_style_for_ext(path)
     header_lines = build_header_block(
         filename=path,
         name=name,
@@ -281,30 +282,25 @@ def process_file_update_existing(
     if not looks_like_42_header(lines[:HEADER_SCAN_LINES]):
         return False, "no-42-header"
 
-    changed = False
-    new_lines = list(lines)
-    limit = min(HEADER_SCAN_LINES, len(lines))
-    for i in range(limit):
-        line = new_lines[i]
-        orig = line
-        if "By:" in line:
-            line = update_by_line(line, name, email, preserve_width)
-        if "Created:" in line:
-            line = update_dt_line(line, RE_CREATED, created_dt, preserve_width)
-        if "Updated:" in line:
-            line = update_dt_line(line, RE_UPDATED, updated_dt, preserve_width)
-        if line != orig:
-            new_lines[i] = line
-            changed = True
-
-    if changed and not dry_run:
+    style = comment_style_for_ext(path)
+    header_lines = build_header_block(
+        filename=path,
+        name=name,
+        email=email,
+        created_dt=created_dt,
+        updated_dt=updated_dt,
+        style=style,
+    )
+    line_ending = "\r\n" if lines[0].endswith("\r\n") else "\n"
+    new_lines = [hl + line_ending for hl in header_lines] + lines[len(header_lines):]
+    if not dry_run:
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(new_lines)
         except Exception:
             return False, "write-fail"
 
-    return changed, "ok" if changed else "unchanged"
+    return True, "ok"
 
 def plan_timeline(
     n_files: int,
@@ -381,8 +377,11 @@ def main() -> None:
         help="File extensions to include",
     )
     ap.add_argument("--recursive", action="store_true", help="Recurse into subdirectories")
-    ap.add_argument("--preserve-width", action="store_true",
-                    help="Preserve existing header line widths when updating")
+    ap.add_argument("--preserve-width", dest="preserve_width", action="store_true",
+                    help="Preserve existing header line widths when updating (default)")
+    ap.add_argument("--no-preserve-width", dest="preserve_width", action="store_false",
+                    help="Allow line width changes when updating")
+    ap.set_defaults(preserve_width=True)
     ap.add_argument("--dry-run", action="store_true", help="Preview without writing")
     ap.add_argument("--order", choices=["name", "mtime"], default="name",
                     help="Order files before timestamping (default: name)")
@@ -392,9 +391,12 @@ def main() -> None:
     ap.add_argument("--work-min", type=int, default=180, help="Seconds between Created and Updated (min, default 180)")
     ap.add_argument("--work-max", type=int, default=360, help="Seconds between Created and Updated (max, default 360)")
     ap.add_argument("--seed", type=int, help="Seed for reproducible timing plan")
-    # Add headers when missing
-    ap.add_argument("--add-missing", action="store_true",
-                    help="Insert a 42-style header if the file does not have one")
+    # Add headers when missing (default), allow opt-out
+    ap.add_argument("--add-missing", dest="add_missing", action="store_true",
+                    help="Insert a 42-style header if the file does not have one (default)")
+    ap.add_argument("--no-add-missing", dest="add_missing", action="store_false",
+                    help="Only update existing headers; do not insert missing ones")
+    ap.set_defaults(add_missing=True)
 
     args = ap.parse_args()
 
